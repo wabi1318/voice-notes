@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>app.voice-notes.capture</string>
+<key>CFBundleName</key><string>Voice Notes</string>
+<key>NSMicrophoneUsageDescription</key><string>マイク音声を端末内で文字起こしし、Macの再生音の回り込みを抑えます。</string>
+<key>NSSpeechRecognitionUsageDescription</key><string>マイクとMacの再生音を端末内で文字起こしします。</string>
+</dict></plist>
