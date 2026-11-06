@@ -1,4 +1,12 @@
 __pycache__/
 *.pyc
 sessions/
+.DS_Store
 work-log.md
+design.md
+.settings.json
+run/
+app/build/
+node_modules/
+dist/
+*.tgz
