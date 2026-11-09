@@ -1,7 +1,0 @@
-#!/bin/bash
-
-set -euo pipefail
-export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-script_dir="$(cd "$(dirname "$0")" && pwd)"
-export VOICE_NOTE_COMMAND="$script_dir/voice-note-ts"
-exec bun run "$script_dir/../src/cli.ts" "$@"
