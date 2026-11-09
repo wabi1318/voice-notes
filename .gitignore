@@ -6,7 +6,6 @@ work-log.md
 design.md
 .settings.json
 run/
-app/build/
 node_modules/
 dist/
 *.tgz
