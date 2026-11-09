@@ -5,18 +5,15 @@ Macのマイク音声と再生音を文字起こしし、原文を残したま�
 
 ![フォルダとノートを選ぶホーム画面](docs/images/home.png)
 
-画面は架空のデータを使った例です。
-
 ## 必要な環境
 
 - macOS 26以降
 - [Bun](https://bun.com/docs/installation) 1.3.0以降
-- Node.js 26.4.0以降とpnpm
+- Node.js 26.4.0以降
 - macOS 26対応のXcode Command Line Tools
 - インストール・認証済みの[Codex CLI](https://developers.openai.com/codex/cli)（要約生成の確認版: 0.160.1）
 
 Xcode Command Line Toolsが未導入なら、`xcode-select --install`を実行してください。
-録音・翻訳用プログラムは初回利用時にコンパイルします。
 
 「システム設定 → プライバシーとセキュリティ」で、使用するターミナルに次の権限を許可してください。
 
@@ -25,19 +22,21 @@ Xcode Command Line Toolsが未導入なら、`xcode-select --install`を実行�
 
 音声認識データは初回録音時にAppleからダウンロードします。
 
-## インストール
+## ビルド・起動
+
+リポジトリを取得し、依存関係をインストールして起動します。
 
 ```bash
-pnpm add -g @wabi1318/voice-notes
+git clone https://github.com/wabi1318/voice-notes.git
+cd voice-notes
+bun install --frozen-lockfile --minimum-release-age=604800
+bun run start
 ```
+
+録音・翻訳用プログラムは初回利用時に自動でビルドします。
+次回以降は、このリポジトリ内で`bun run start`を実行します。
 
 ## 使い方
-
-任意のフォルダで起動します。
-
-```bash
-voice-note
-```
 
 1. 保存先のフォルダと認識言語（日本語／英語）を選び、「録音開始 [r]」を押します。
 2. 「録音停止 [s]」を押すと、修正した文字起こしと要約を生成します。
@@ -58,12 +57,10 @@ voice-note
 
 ## 保存先とデータの扱い
 
-配布パッケージの記録は`~/Library/Application Support/Voice Notes/sessions/`に保存します。
-リポジトリを取得して起動する場合は、その中の`sessions/`を使います。
+既定では、リポジトリ内の`sessions/`に保存します。
 
 原文・訳文・要約は録音ごとのフォルダへ保存します。「Finderで開く [f]」を押すと保存フォルダを開けます。
 原文は修正結果で上書きしません。AIによる修正・要約は原文と照らして確認してください。
-パッケージの更新やアンインストールで記録は削除しません。
 
 文字起こしと同時翻訳はMac内で処理します。
 修正・要約時には原文を、タイトル生成時には要約をCodex CLIへ送信します。利用条件はCodexの契約に従います。
@@ -74,5 +71,3 @@ voice-note
 ## ライセンス
 
 [MIT License](LICENSE)
-
-保守者: [wabi1318](https://github.com/wabi1318) ／ [問い合わせ](https://github.com/wabi1318/voice-notes/issues)
