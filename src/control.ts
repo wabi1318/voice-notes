@@ -28,7 +28,7 @@ async function handleControlSocket(socket: Socket, sessionDirectory: string, sto
   let requestText = "";
 
   const responsePromise = new Promise<RunState | ControlResponse>((resolveResponse) => {
-    socket.on("data", (chunk) => {
+    socket.on("data", function readRequest(chunk) {
       requestText += chunk.toString("utf8");
       if (requestText.length > 1_024) {
         resolveResponse({ phase: "unknown", error: "invalid request" });
@@ -37,6 +37,8 @@ async function handleControlSocket(socket: Socket, sessionDirectory: string, sto
       }
       const newlineIndex = requestText.indexOf("\n");
       if (newlineIndex < 0) return;
+      // 後続データで同じ停止要求を繰り返し実行しない。
+      socket.off("data", readRequest);
       let requestJson: unknown;
       try {
         requestJson = JSON.parse(requestText.slice(0, newlineIndex));
@@ -65,7 +67,11 @@ async function handleControlSocket(socket: Socket, sessionDirectory: string, sto
         resolveResponse({ phase: "unknown", error: "unknown action" });
       })().catch(() => resolveResponse({ phase: "unknown", error: "invalid request" }));
     });
-    socket.once("timeout", () => resolveResponse({ phase: "unknown", error: "request timeout" }));
+    socket.once("timeout", () => {
+      resolveResponse({ phase: "unknown", error: "request timeout" });
+      // 応答を送信できない接続が、要約の開始を待たせ続けないようにする。
+      socket.destroy();
+    });
     socket.once("error", () => resolveResponse({ phase: "unknown", error: "invalid request" }));
   });
 
