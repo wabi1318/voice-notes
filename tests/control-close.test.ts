@@ -134,7 +134,8 @@ try {
   await stopped;
   peer.write("additional chunk");
   await replayReceived;
-  await Promise.resolve();
+  // 途中の待機回数に依存させないよう、受信処理の続きを終えてから回数を確認する。
+  await new Promise<void>(resolve => setImmediate(resolve));
   process.stdout.write(JSON.stringify({ stopCount }));
 } finally {
   releaseWrite();
