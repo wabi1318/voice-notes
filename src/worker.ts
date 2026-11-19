@@ -176,32 +176,41 @@ export async function runWorker(sessionDirectory: string, categoryFolder = "", r
       if (sessionState.phase !== "failed" && sessionState.phase !== "interrupted") return;
       await validateTranscript(rawPath);
     } else {
-      const sessionState = await readState(sessionDirectory);
-      if (sessionState.phase !== "starting") return;
-      controlServer = await startControlServer(sessionDirectory, () => stopController.abort());
-      let translation: Awaited<ReturnType<typeof startLiveTranslation>> | undefined;
-      const recognitionLanguage = getRecognitionLanguage({
-        recognition_language: sessionState.recognition_language,
-        translation_mode: sessionState.translation_mode,
-      });
-      const translateToJapanese = recognitionLanguage === "en-US" && sessionState.translation_mode === "en-ja";
-      if (translateToJapanese) {
-        let translator: Awaited<ReturnType<typeof startNativeTranslator>> | undefined;
-        try {
-          translator = await startNativeTranslator();
-          translation = await startLiveTranslation(sessionDirectory, translator);
-        } catch (error) {
-          await translator?.close();
-          await writeFile(join(sessionDirectory, TRANSLATION_ERROR_FILENAME), errorMessage(error), { mode: 0o600 });
-        }
+      const recordingLock = await tryAcquireProcessLock(RECORD_LOCK);
+      if (recordingLock.kind === "held") {
+        if ((await readState(sessionDirectory)).phase !== "starting") return;
+        throw new Error("別の録音がすでに実行中です");
       }
       try {
-        await recordInWorker(sessionDirectory, stopController.signal, {
-          locale: recognitionLanguage,
-          onTranscriptChunk: translation?.appendTranscriptChunk,
+        const sessionState = await readState(sessionDirectory);
+        if (sessionState.phase !== "starting") return;
+        controlServer = await startControlServer(sessionDirectory, () => stopController.abort());
+        let translation: Awaited<ReturnType<typeof startLiveTranslation>> | undefined;
+        const recognitionLanguage = getRecognitionLanguage({
+          recognition_language: sessionState.recognition_language,
+          translation_mode: sessionState.translation_mode,
         });
+        const translateToJapanese = recognitionLanguage === "en-US" && sessionState.translation_mode === "en-ja";
+        if (translateToJapanese) {
+          let translator: Awaited<ReturnType<typeof startNativeTranslator>> | undefined;
+          try {
+            translator = await startNativeTranslator();
+            translation = await startLiveTranslation(sessionDirectory, translator);
+          } catch (error) {
+            await translator?.close();
+            await writeFile(join(sessionDirectory, TRANSLATION_ERROR_FILENAME), errorMessage(error), { mode: 0o600 });
+          }
+        }
+        try {
+          await recordInWorker(sessionDirectory, stopController.signal, {
+            locale: recognitionLanguage,
+            onTranscriptChunk: translation?.appendTranscriptChunk,
+          });
+        } finally {
+          await translation?.finish();
+        }
       } finally {
-        await translation?.finish();
+        await recordingLock.lock.release();
       }
     }
 
@@ -227,7 +236,9 @@ export async function runWorker(sessionDirectory: string, categoryFolder = "", r
     if (currentState.phase !== "failed") {
       const failureLock = await acquireProcessLock(START_LOCK);
       try {
-        await writeState("failed", sessionDirectory, { error: errorMessage(error) });
+        if ((await readState(sessionDirectory)).phase !== "failed") {
+          await writeState("failed", sessionDirectory, { error: errorMessage(error) });
+        }
       } finally {
         await failureLock.release();
       }
@@ -329,19 +340,27 @@ export async function startCapture(
       await delay(100);
     }
 
-    const activeAfterWait = await sendControl("status", sessionDirectory);
-    if (activeAfterWait?.session_dir === sessionDirectory) {
+    // 失敗を書き込む間にワーカーが録音を開始できないようにする。
+    const startupLock = await tryAcquireProcessLock(RECORD_LOCK);
+    if (startupLock.kind === "held") {
       return `録音を準備中です。状態を確認してください: ${sessionDirectory}`;
     }
-    const savedState = await readState(sessionDirectory);
-    if (savedState.session_dir === sessionDirectory && savedState.phase === "failed") {
-      throw new Error(`録音を開始できませんでした: ${savedState.error ?? "unknown error"}`);
+    try {
+      const savedState = await readState(sessionDirectory);
+      if (savedState.phase === "failed") {
+        throw new Error(`録音を開始できませんでした: ${savedState.error ?? "unknown error"}`);
+      }
+      if (isCaptureInProgress(savedState.phase)) {
+        // 原文の出力前でも、ワーカーが処理中なら録音の結果をワーカーに記録させる。
+        if (await isProcessLockActive(sessionWorkLockPath(sessionDirectory))) {
+          return `録音の結果を確認中です: ${sessionDirectory}`;
+        }
+        await writeState("failed", sessionDirectory, { error: "録音プロセスが準備時間内に開始しませんでした" });
+      }
+      throw new Error(`録音プロセスを開始できませんでした。ログ: ${join(RUN_DIR, "worker.log")}`);
+    } finally {
+      await startupLock.lock.release();
     }
-    if (isCaptureInProgress(savedState.phase) && await isProcessLockActive(RECORD_LOCK)) {
-      return `録音を準備中です。状態を確認してください: ${sessionDirectory}`;
-    }
-    await writeState("failed", sessionDirectory, { error: "録音プロセスが準備時間内に開始しませんでした" });
-    throw new Error(`録音プロセスを開始できませんでした。ログ: ${join(RUN_DIR, "worker.log")}`);
   } finally {
     await startLock.release();
   }

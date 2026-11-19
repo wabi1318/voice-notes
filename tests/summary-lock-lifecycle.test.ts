@@ -99,7 +99,14 @@ try {
   }
 }, 12_000);
 
-test.skipIf(process.platform !== "darwin")("前の要約が未完了でも次の録音が開始して原文を保存する", async () => {
+test.skipIf(process.platform !== "darwin").each(["recording", "finished", "failed", "startup-failed"] as const)("状態取得が途切れても重複を防ぎ、次の録音が%sなら結果を保持する", async (nextRecording) => {
+  const expectedPhase = { recording: "recording", finished: "analyzing", failed: "failed", "startup-failed": "failed" }[nextRecording];
+  const expectedError = {
+    recording: undefined,
+    finished: undefined,
+    failed: "録音補助プロセスの失敗",
+    "startup-failed": "原文出力前に録音補助プロセスが失敗しました",
+  }[nextRecording];
   const root = await mkdtemp("/private/tmp/vnpar-");
   try {
     await mkdir(join(root, "bin"));
@@ -107,8 +114,19 @@ test.skipIf(process.platform !== "darwin")("前の要約が未完了でも次の
     const capture = join(root, "capture");
     await writeFile(capture, `#!/usr/bin/env bun
 process.on("SIGINT",()=>process.exit(0));
-process.stdout.write("WEBVTT\\n\\n00:00.000 --> 00:01.000\\n<v Mic>fixture recording\\n\\n");
-setInterval(()=>{},1000);
+const transcript = "WEBVTT\\n\\n00:00.000 --> 00:01.000\\n<v Mic>fixture recording\\n\\n";
+if (process.env.FIXTURE_CAPTURE_OUTCOME === "startup-failed") {
+  process.stderr.write("原文出力前に録音補助プロセスが失敗しました\\n",()=>process.exit(1));
+} else if (process.env.FIXTURE_CAPTURE_OUTCOME === "finished") {
+  process.stdout.write(transcript,()=>process.exit(0));
+} else {
+  process.stdout.write(transcript);
+  if (process.env.FIXTURE_CAPTURE_OUTCOME === "failed") {
+    setTimeout(()=>process.stderr.write("録音補助プロセスの失敗\\n",()=>process.exit(1)),150);
+  } else {
+    setTimeout(()=>process.exit(1),15000);
+  }
+}
 `, { mode: 0o700 });
     const runner = join(root, "runner.ts");
     await writeFile(runner, `import {mock} from "bun:test";
@@ -117,16 +135,42 @@ import {join} from "node:path";
 const project=${JSON.stringify(project)};
 const root=${JSON.stringify(root)};
 process.env.VOICE_NOTE_RUN_DIR=join(root,"run");
+process.env.VOICE_NOTE_SETTINGS_PATH=join(root,"settings.json");
 process.env.VOICE_NOTE_DISABLE_NOTIFICATIONS="1";
+process.env.FIXTURE_CAPTURE_OUTCOME="recording";
 process.env.PATH=join(root,"bin")+":"+(process.env.PATH??"");
 let worker;
+let recordingStatusUnavailable=false;
+let rejectDuplicateLaunch=false;
 const runningWorkers:Promise<void>[]=[];
+const nextRecording=${JSON.stringify(nextRecording)};
+const controlPath=join(project,"src/control.ts");
+const control=await import(controlPath);
+const sendControl=control.sendControl;
+mock.module(controlPath,()=>({...control,sendControl:(action,session)=>
+ recordingStatusUnavailable && action==="status" ? Promise.resolve(undefined) : sendControl(action,session)
+}));
 const processesPath=join(project,"src/processes.ts");
 const processes=await import(processesPath);
 const spawnCommand=processes.startCommand;
+const {RECORD_LOCK,sessionWorkLockPath}=await import(join(project,"src/config.ts"));
+const {acquireProcessLock}=await import(join(project,"src/locks.ts"));
 mock.module(processesPath,()=>({...processes,startCommand:(command,args,options)=>{
  if(args.includes(join(project,"src/worker.ts"))){
-  runningWorkers.push(worker.runWorker(args[2],args[3]));
+  if(rejectDuplicateLaunch) throw new Error("重複する録音ワーカーを起動した");
+  if(runningWorkers.length===0 && nextRecording==="recording"){
+   runningWorkers.push((async()=>{
+    const sessionProbe=await acquireProcessLock(sessionWorkLockPath(args[2]));
+    const recordingProbe=await acquireProcessLock(RECORD_LOCK);
+    await Promise.all([
+     worker.runWorker(args[2],args[3]),
+     new Promise(resolve=>setTimeout(resolve,100)).then(()=>sessionProbe.release()),
+     new Promise(resolve=>setTimeout(resolve,300)).then(()=>recordingProbe.release()),
+    ]);
+   })());
+  } else {
+   runningWorkers.push(worker.runWorker(args[2],args[3]));
+  }
   return spawnCommand("/usr/bin/true",[],options);
  }
  return spawnCommand(command,args,options);
@@ -142,20 +186,45 @@ mock.module(join(project,"src/summary.ts"),()=>({analyzeTranscript:async(raw)=>{
 }}));
 worker=await import(join(project,"src/worker.ts"));
 const {readState}=await import(join(project,"src/state.ts"));
-const {sendControl}=await import(join(project,"src/control.ts"));
 let oldSession;
 let nextSession;
 try{
  await worker.startCapture(join(root,"sessions"),"","off");
  oldSession=(await readState()).session_dir;
+
+ recordingStatusUnavailable=true;
+ rejectDuplicateLaunch=true;
+ let duplicateStart;
+ try {
+  duplicateStart=await worker.startCapture(join(root,"sessions"),"","off");
+ } finally {
+  recordingStatusUnavailable=false;
+  rejectDuplicateLaunch=false;
+ }
+
  await worker.stopCapture();
  await summaryStarted;
- await worker.startCapture(join(root,"sessions"),"","off");
- nextSession=(await readState()).session_dir;
- const nextStatus=await worker.getPublicStatus(nextSession);
+ process.env.FIXTURE_CAPTURE_OUTCOME=nextRecording;
+ recordingStatusUnavailable=true;
+ let nextStart;
+ try {
+  nextStart=await worker.startCapture(join(root,"sessions"),"","off");
+ } finally {
+  recordingStatusUnavailable=false;
+  nextSession=(await readState()).session_dir;
+ }
+ const expectedPhase=${JSON.stringify(expectedPhase)};
+ const deadline=Date.now()+2000;
+ let nextState=await readState(nextSession);
+ while(Date.now()<deadline && nextState.phase!==expectedPhase){
+  await new Promise(resolve=>setTimeout(resolve,25));
+  nextState=await readState(nextSession);
+ }
  const oldStatus=await worker.getPublicStatus(oldSession);
  const raw=await readFile(join(nextSession,"raw.vtt"),"utf8");
- process.stdout.write(JSON.stringify({differentSession:nextSession!==oldSession,nextPhase:nextStatus.phase,
+ const expectedMessage=nextRecording==="recording" ? "録音を準備中です。" : "録音の結果を確認中です";
+ process.stdout.write(JSON.stringify({duplicateStart, expectedOutcome:nextStart.startsWith(expectedMessage),
+   differentSession:nextSession!==oldSession,nextPhase:nextState.phase,nextError:nextState.error,
    oldPhase:oldStatus.phase,captionSaved:raw.includes("fixture recording")}));
 }finally{
  if(nextSession)await sendControl("stop",nextSession);
@@ -164,10 +233,17 @@ try{
  await Promise.all(runningWorkers);
 }
 `);
-    const { stdout } = await executeFile(process.execPath, [runner], { timeout: 12_000 });
-    const result: { differentSession: boolean; nextPhase: string; oldPhase: string; captionSaved: boolean } = JSON.parse(stdout);
-    expect(result).toEqual({ differentSession: true, nextPhase: "recording", oldPhase: "analyzing", captionSaved: true });
+    const { stdout } = await executeFile(process.execPath, [runner], { timeout: 18_000 });
+    expect(JSON.parse(stdout)).toEqual({
+      duplicateStart: "処理中です: recording",
+      expectedOutcome: true,
+      differentSession: true,
+      nextPhase: expectedPhase,
+      ...(expectedError === undefined ? {} : { nextError: expectedError }),
+      oldPhase: "analyzing",
+      captionSaved: nextRecording !== "startup-failed",
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
-}, 15_000);
+}, 20_000);
