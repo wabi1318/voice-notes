@@ -99,7 +99,7 @@ try {
   }
 }, 12_000);
 
-test.skipIf(process.platform !== "darwin")("録音中は通信できなくても重複を防ぎ、要約中は次の原文を保存できる", async () => {
+test.skipIf(process.platform !== "darwin").each(["recording", "finished", "failed"] as const)("状態取得が途切れても重複を防ぎ、次の録音が%sなら原文を保持する", async (nextRecording) => {
   const root = await mkdtemp("/private/tmp/vnpar-");
   try {
     await mkdir(join(root, "bin"));
@@ -107,8 +107,17 @@ test.skipIf(process.platform !== "darwin")("録音中は通信できなくても
     const capture = join(root, "capture");
     await writeFile(capture, `#!/usr/bin/env bun
 process.on("SIGINT",()=>process.exit(0));
-process.stdout.write("WEBVTT\\n\\n00:00.000 --> 00:01.000\\n<v Mic>fixture recording\\n\\n");
-setTimeout(()=>process.exit(1),9000);
+const transcript = "WEBVTT\\n\\n00:00.000 --> 00:01.000\\n<v Mic>fixture recording\\n\\n";
+if (process.env.FIXTURE_CAPTURE_OUTCOME === "finished") {
+  process.stdout.write(transcript,()=>process.exit(0));
+} else {
+  process.stdout.write(transcript);
+  if (process.env.FIXTURE_CAPTURE_OUTCOME === "failed") {
+    setTimeout(()=>process.stderr.write("録音補助プロセスの失敗\\n",()=>process.exit(1)),150);
+  } else {
+    setTimeout(()=>process.exit(1),15000);
+  }
+}
 `, { mode: 0o700 });
     const runner = join(root, "runner.ts");
     await writeFile(runner, `import {mock} from "bun:test";
@@ -119,6 +128,7 @@ const root=${JSON.stringify(root)};
 process.env.VOICE_NOTE_RUN_DIR=join(root,"run");
 process.env.VOICE_NOTE_SETTINGS_PATH=join(root,"settings.json");
 process.env.VOICE_NOTE_DISABLE_NOTIFICATIONS="1";
+process.env.FIXTURE_CAPTURE_OUTCOME="recording";
 process.env.PATH=join(root,"bin")+":"+(process.env.PATH??"");
 let worker;
 let recordingStatusUnavailable=false;
@@ -170,6 +180,8 @@ try{
 
  await worker.stopCapture();
  await summaryStarted;
+ const nextRecording=${JSON.stringify(nextRecording)};
+ process.env.FIXTURE_CAPTURE_OUTCOME=nextRecording;
  recordingStatusUnavailable=true;
  let nextStart;
  try {
@@ -178,11 +190,18 @@ try{
   recordingStatusUnavailable=false;
   nextSession=(await readState()).session_dir;
  }
- const nextStatus=await worker.getPublicStatus(nextSession);
+ const expectedPhase={recording:"recording",finished:"analyzing",failed:"failed"}[nextRecording];
+ const deadline=Date.now()+2000;
+ let nextState=await readState(nextSession);
+ while(Date.now()<deadline && nextState.phase!==expectedPhase){
+  await new Promise(resolve=>setTimeout(resolve,25));
+  nextState=await readState(nextSession);
+ }
  const oldStatus=await worker.getPublicStatus(oldSession);
  const raw=await readFile(join(nextSession,"raw.vtt"),"utf8");
- process.stdout.write(JSON.stringify({duplicateStart, startupStillPending:nextStart.startsWith("録音を準備中です。"),
-   differentSession:nextSession!==oldSession,nextPhase:nextStatus.phase,
+ const expectedMessage=nextRecording==="recording" ? "録音を準備中です。" : "録音の結果を確認中です";
+ process.stdout.write(JSON.stringify({duplicateStart, expectedOutcome:nextStart.startsWith(expectedMessage),
+   differentSession:nextSession!==oldSession,nextPhase:nextState.phase,nextError:nextState.error,
    oldPhase:oldStatus.phase,captionSaved:raw.includes("fixture recording")}));
 }finally{
  if(nextSession)await sendControl("stop",nextSession);
@@ -191,16 +210,17 @@ try{
  await Promise.all(runningWorkers);
 }
 `);
-    const { stdout } = await executeFile(process.execPath, [runner], { timeout: 12_000 });
+    const { stdout } = await executeFile(process.execPath, [runner], { timeout: 18_000 });
     expect(JSON.parse(stdout)).toEqual({
       duplicateStart: "処理中です: recording",
-      startupStillPending: true,
+      expectedOutcome: true,
       differentSession: true,
-      nextPhase: "recording",
+      nextPhase: nextRecording === "finished" ? "analyzing" : nextRecording,
+      ...(nextRecording === "failed" ? { nextError: "録音補助プロセスの失敗" } : {}),
       oldPhase: "analyzing",
       captionSaved: true,
     });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
-}, 15_000);
+}, 20_000);

@@ -177,7 +177,10 @@ export async function runWorker(sessionDirectory: string, categoryFolder = "", r
       await validateTranscript(rawPath);
     } else {
       const recordingLock = await tryAcquireProcessLock(RECORD_LOCK);
-      if (recordingLock.kind === "held") throw new Error("別の録音がすでに実行中です");
+      if (recordingLock.kind === "held") {
+        if ((await readState(sessionDirectory)).phase !== "starting") return;
+        throw new Error("別の録音がすでに実行中です");
+      }
       try {
         const sessionState = await readState(sessionDirectory);
         if (sessionState.phase !== "starting") return;
@@ -233,7 +236,9 @@ export async function runWorker(sessionDirectory: string, categoryFolder = "", r
     if (currentState.phase !== "failed") {
       const failureLock = await acquireProcessLock(START_LOCK);
       try {
-        await writeState("failed", sessionDirectory, { error: errorMessage(error) });
+        if ((await readState(sessionDirectory)).phase !== "failed") {
+          await writeState("failed", sessionDirectory, { error: errorMessage(error) });
+        }
       } finally {
         await failureLock.release();
       }
@@ -335,10 +340,6 @@ export async function startCapture(
       await delay(100);
     }
 
-    const activeAfterWait = await sendControl("status", sessionDirectory);
-    if (activeAfterWait?.session_dir === sessionDirectory) {
-      return `録音を準備中です。状態を確認してください: ${sessionDirectory}`;
-    }
     // 失敗を書き込む間にワーカーが録音を開始できないようにする。
     const startupLock = await tryAcquireProcessLock(RECORD_LOCK);
     if (startupLock.kind === "held") {
@@ -349,7 +350,14 @@ export async function startCapture(
       if (savedState.phase === "failed") {
         throw new Error(`録音を開始できませんでした: ${savedState.error ?? "unknown error"}`);
       }
-      await writeState("failed", sessionDirectory, { error: "録音プロセスが準備時間内に開始しませんでした" });
+      // 録音が終わったワーカーが開始側のロック解除を待っている間は、結果の確定を委ねる。
+      if ((savedState.phase === "recording" || savedState.phase === "stopping")
+        && await isProcessLockActive(sessionWorkLockPath(sessionDirectory))) {
+        return `録音の結果を確認中です: ${sessionDirectory}`;
+      }
+      if (isCaptureInProgress(savedState.phase)) {
+        await writeState("failed", sessionDirectory, { error: "録音プロセスが準備時間内に開始しませんでした" });
+      }
       throw new Error(`録音プロセスを開始できませんでした。ログ: ${join(RUN_DIR, "worker.log")}`);
     } finally {
       await startupLock.lock.release();
