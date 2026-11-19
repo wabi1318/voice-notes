@@ -99,7 +99,14 @@ try {
   }
 }, 12_000);
 
-test.skipIf(process.platform !== "darwin").each(["recording", "finished", "failed"] as const)("状態取得が途切れても重複を防ぎ、次の録音が%sなら原文を保持する", async (nextRecording) => {
+test.skipIf(process.platform !== "darwin").each(["recording", "finished", "failed", "startup-failed"] as const)("状態取得が途切れても重複を防ぎ、次の録音が%sなら結果を保持する", async (nextRecording) => {
+  const expectedPhase = { recording: "recording", finished: "analyzing", failed: "failed", "startup-failed": "failed" }[nextRecording];
+  const expectedError = {
+    recording: undefined,
+    finished: undefined,
+    failed: "録音補助プロセスの失敗",
+    "startup-failed": "原文出力前に録音補助プロセスが失敗しました",
+  }[nextRecording];
   const root = await mkdtemp("/private/tmp/vnpar-");
   try {
     await mkdir(join(root, "bin"));
@@ -108,7 +115,9 @@ test.skipIf(process.platform !== "darwin").each(["recording", "finished", "faile
     await writeFile(capture, `#!/usr/bin/env bun
 process.on("SIGINT",()=>process.exit(0));
 const transcript = "WEBVTT\\n\\n00:00.000 --> 00:01.000\\n<v Mic>fixture recording\\n\\n";
-if (process.env.FIXTURE_CAPTURE_OUTCOME === "finished") {
+if (process.env.FIXTURE_CAPTURE_OUTCOME === "startup-failed") {
+  process.stderr.write("原文出力前に録音補助プロセスが失敗しました\\n",()=>process.exit(1));
+} else if (process.env.FIXTURE_CAPTURE_OUTCOME === "finished") {
   process.stdout.write(transcript,()=>process.exit(0));
 } else {
   process.stdout.write(transcript);
@@ -134,6 +143,7 @@ let worker;
 let recordingStatusUnavailable=false;
 let rejectDuplicateLaunch=false;
 const runningWorkers:Promise<void>[]=[];
+const nextRecording=${JSON.stringify(nextRecording)};
 const controlPath=join(project,"src/control.ts");
 const control=await import(controlPath);
 const sendControl=control.sendControl;
@@ -143,10 +153,24 @@ mock.module(controlPath,()=>({...control,sendControl:(action,session)=>
 const processesPath=join(project,"src/processes.ts");
 const processes=await import(processesPath);
 const spawnCommand=processes.startCommand;
+const {RECORD_LOCK,sessionWorkLockPath}=await import(join(project,"src/config.ts"));
+const {acquireProcessLock}=await import(join(project,"src/locks.ts"));
 mock.module(processesPath,()=>({...processes,startCommand:(command,args,options)=>{
  if(args.includes(join(project,"src/worker.ts"))){
   if(rejectDuplicateLaunch) throw new Error("重複する録音ワーカーを起動した");
-  runningWorkers.push(worker.runWorker(args[2],args[3]));
+  if(runningWorkers.length===0 && nextRecording==="recording"){
+   runningWorkers.push((async()=>{
+    const sessionProbe=await acquireProcessLock(sessionWorkLockPath(args[2]));
+    const recordingProbe=await acquireProcessLock(RECORD_LOCK);
+    await Promise.all([
+     worker.runWorker(args[2],args[3]),
+     new Promise(resolve=>setTimeout(resolve,100)).then(()=>sessionProbe.release()),
+     new Promise(resolve=>setTimeout(resolve,300)).then(()=>recordingProbe.release()),
+    ]);
+   })());
+  } else {
+   runningWorkers.push(worker.runWorker(args[2],args[3]));
+  }
   return spawnCommand("/usr/bin/true",[],options);
  }
  return spawnCommand(command,args,options);
@@ -180,7 +204,6 @@ try{
 
  await worker.stopCapture();
  await summaryStarted;
- const nextRecording=${JSON.stringify(nextRecording)};
  process.env.FIXTURE_CAPTURE_OUTCOME=nextRecording;
  recordingStatusUnavailable=true;
  let nextStart;
@@ -190,7 +213,7 @@ try{
   recordingStatusUnavailable=false;
   nextSession=(await readState()).session_dir;
  }
- const expectedPhase={recording:"recording",finished:"analyzing",failed:"failed"}[nextRecording];
+ const expectedPhase=${JSON.stringify(expectedPhase)};
  const deadline=Date.now()+2000;
  let nextState=await readState(nextSession);
  while(Date.now()<deadline && nextState.phase!==expectedPhase){
@@ -215,10 +238,10 @@ try{
       duplicateStart: "処理中です: recording",
       expectedOutcome: true,
       differentSession: true,
-      nextPhase: nextRecording === "finished" ? "analyzing" : nextRecording,
-      ...(nextRecording === "failed" ? { nextError: "録音補助プロセスの失敗" } : {}),
+      nextPhase: expectedPhase,
+      ...(expectedError === undefined ? {} : { nextError: expectedError }),
       oldPhase: "analyzing",
-      captionSaved: true,
+      captionSaved: nextRecording !== "startup-failed",
     });
   } finally {
     await rm(root, { recursive: true, force: true });

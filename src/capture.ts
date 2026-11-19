@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { CAPTURE_START_POLL_MS, PROJECT_DIR, RECORD_LOCK, START_LOCK, STOP_TIMEOUT_MS } from "./config.ts";
 import { sendControl } from "./control.ts";
-import { acquireProcessLock, tryAcquireProcessLock } from "./locks.ts";
+import { acquireProcessLock, LOCK_PROBE_WAIT_SECONDS, tryAcquireProcessLock } from "./locks.ts";
 import type { ProcessLock } from "./locks.ts";
 import { sendChildSignal, sendProcessSignal, startCommand, waitForChild } from "./processes.ts";
 import type { ChildSignalTarget } from "./processes.ts";
@@ -119,7 +119,7 @@ async function waitForCaptureReady(
     }
     if (!isProcessRunning(childProcess)) {
       const exit = await childExit;
-      if (exit.code === 75) throw new Error("前景録音がすでに実行中です");
+      if (exit.code === 75) throw new Error("別の録音がすでに実行中です");
       throw new Error(`録音を開始できませんでした。終了コード: ${String(exit.code)}`);
     }
     await delay(CAPTURE_START_POLL_MS);
@@ -142,7 +142,7 @@ async function captureAudio(options: CaptureOptions): Promise<CaptureResult> {
         "-k",
         "-n",
         "-t",
-        "0",
+        String(LOCK_PROBE_WAIT_SECONDS),
         options.recordLockPath,
         process.execPath,
         "run",
@@ -340,7 +340,7 @@ export async function recordTranscript(durationSeconds: number | undefined, outp
   let sessionDirectory: string | undefined;
   try {
     const recordLockAttempt = await tryAcquireProcessLock(RECORD_LOCK);
-    if (recordLockAttempt.kind === "held") throw new Error("前景録音がすでに実行中です");
+    if (recordLockAttempt.kind === "held") throw new Error("別の録音がすでに実行中です");
     recordLockProbe = recordLockAttempt.lock;
     if (await sendControl("status")) throw new Error("バックグラウンド処理が実行中です");
 

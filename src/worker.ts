@@ -350,12 +350,11 @@ export async function startCapture(
       if (savedState.phase === "failed") {
         throw new Error(`録音を開始できませんでした: ${savedState.error ?? "unknown error"}`);
       }
-      // 録音が終わったワーカーが開始側のロック解除を待っている間は、結果の確定を委ねる。
-      if ((savedState.phase === "recording" || savedState.phase === "stopping")
-        && await isProcessLockActive(sessionWorkLockPath(sessionDirectory))) {
-        return `録音の結果を確認中です: ${sessionDirectory}`;
-      }
       if (isCaptureInProgress(savedState.phase)) {
+        // 原文の出力前でも、ワーカーが処理中なら録音の結果をワーカーに記録させる。
+        if (await isProcessLockActive(sessionWorkLockPath(sessionDirectory))) {
+          return `録音の結果を確認中です: ${sessionDirectory}`;
+        }
         await writeState("failed", sessionDirectory, { error: "録音プロセスが準備時間内に開始しませんでした" });
       }
       throw new Error(`録音プロセスを開始できませんでした。ログ: ${join(RUN_DIR, "worker.log")}`);

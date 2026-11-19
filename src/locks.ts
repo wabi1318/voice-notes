@@ -8,6 +8,8 @@ import type { ChildProcess } from "node:child_process";
 const LOCKF_COMMAND = "/usr/bin/lockf";
 const LOCK_HOLDER_SCRIPT = join(PROJECT_DIR, "src", "lock-holder.ts");
 const LOCK_RETRY_INTERVAL_MS = 50;
+// 状態確認が一時的に保持するロックの解放を待つ。
+export const LOCK_PROBE_WAIT_SECONDS = 1;
 
 export type ProcessLock = Readonly<{ release: () => Promise<void> }>;
 
@@ -61,9 +63,9 @@ function waitForLockHolder(childProcess: ChildProcess): Promise<boolean> {
   });
 }
 
-async function startLockHolder(lockPath: string): Promise<LockStart> {
+async function startLockHolder(lockPath: string, waitSeconds = 0): Promise<LockStart> {
   await ensureLockFile(lockPath);
-  const lockArguments = ["-k", "-n", "-t", "0", lockPath, process.execPath, "run", LOCK_HOLDER_SCRIPT];
+  const lockArguments = ["-k", "-n", "-t", String(waitSeconds), lockPath, process.execPath, "run", LOCK_HOLDER_SCRIPT];
   const childProcess = startCommand(LOCKF_COMMAND, lockArguments, {
     detached: true,
     stdio: ["pipe", "pipe", "ignore"],
@@ -106,7 +108,7 @@ async function startLockHolder(lockPath: string): Promise<LockStart> {
 }
 
 export async function tryAcquireProcessLock(lockPath: string): Promise<LockAttempt> {
-  const result = await startLockHolder(lockPath);
+  const result = await startLockHolder(lockPath, LOCK_PROBE_WAIT_SECONDS);
   return result.kind === "held" ? result : { kind: "acquired", lock: result.lock };
 }
 
